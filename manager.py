@@ -1,27 +1,116 @@
+import io
 import json
 import os
+import shutil
 import subprocess
+import tarfile
+import threading
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.plugin_system.base_plugin import BasePlugin
 
 
+class _SyncHTTPServer(HTTPServer):
+    """HTTPServer subclass that carries shared plugin state for the request handler."""
+
+    def __init__(self, server_address, handler_class, *, plugin_root: Path,
+                 sync_token: str, system_keys: frozenset, preserve_keys: frozenset,
+                 plugin_id: str) -> None:
+        super().__init__(server_address, handler_class)
+        self.plugin_root = plugin_root
+        self.sync_token = sync_token
+        self.system_keys = system_keys
+        self.preserve_keys = preserve_keys
+        self.plugin_id = plugin_id
+
+
+class _SyncHandler(BaseHTTPRequestHandler):
+    """Serves plugins archive and config over HTTP for pull-based sync."""
+
+    def log_message(self, fmt, *args) -> None:
+        pass  # suppress default stdout access log
+
+    def do_GET(self) -> None:
+        if self.server.sync_token and self.headers.get("X-Sync-Token") != self.server.sync_token:
+            self._json(401, {"error": "Unauthorized"})
+            return
+
+        routes = {
+            "/api/health":  self._health,
+            "/api/plugins": self._plugins_archive,
+            "/api/config":  self._config,
+            "/api/secrets": self._secrets,
+        }
+        handler = routes.get(self.path)
+        if handler:
+            handler()
+        else:
+            self._json(404, {"error": "Not found"})
+
+    def _health(self) -> None:
+        self._json(200, {"status": "ok"})
+
+    def _plugins_archive(self) -> None:
+        plugins_dir = self.server.plugin_root / "plugins"
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            if plugins_dir.exists():
+                for item in sorted(plugins_dir.iterdir()):
+                    if item.is_dir() and item.name != self.server.plugin_id:
+                        tar.add(item, arcname=item.name)
+        data = buf.getvalue()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _config(self) -> None:
+        path = self.server.plugin_root / "config" / "config.json"
+        try:
+            with open(path) as f:
+                full = json.load(f)
+            preserve = self.server.system_keys | self.server.preserve_keys | {self.server.plugin_id}
+            self._json(200, {k: v for k, v in full.items() if k not in preserve})
+        except Exception as e:
+            self._json(500, {"error": str(e)})
+
+    def _secrets(self) -> None:
+        path = self.server.plugin_root / "config" / "config_secrets.json"
+        try:
+            data = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except FileNotFoundError:
+            self._json(404, {"error": "config_secrets.json not found"})
+        except Exception as e:
+            self._json(500, {"error": str(e)})
+
+    def _json(self, code: int, data: dict) -> None:
+        body = json.dumps(data).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 class PluginSyncPlugin(BasePlugin):
 
     _STATE_FILENAME = "plugin_sync_state.json"
 
-    # Top-level config.json keys that are Pi-specific and always preserved locally.
-    # Only keys NOT in this set (i.e. plugin config sections) are pulled from source.
+    # Top-level config.json keys that are Pi-specific and never synced from source.
     _SYSTEM_KEYS = frozenset({
-        "display",
-        "schedule",
-        "dim_schedule",
-        "timezone",
-        "location",
-        "web_display_autostart",
-        "plugin_system",
+        "display", "schedule", "dim_schedule", "timezone",
+        "location", "web_display_autostart", "plugin_system",
     })
 
     def __init__(
@@ -34,12 +123,11 @@ class PluginSyncPlugin(BasePlugin):
     ) -> None:
         super().__init__(plugin_id, config, display_manager, cache_manager, plugin_manager)
 
+        self.server_mode: bool = config.get("server_mode", False)
+        self.server_port: int = int(config.get("server_port", 5001))
+        self.sync_token: str = config.get("sync_token", "")
         self.source_host: str = config.get("source_host", "")
-        self.source_user: str = config.get("source_user", "pi")
-        self.source_path: str = config.get("source_ledmatrix_path", "/home/pi/LEDMatrix")
-        self.ssh_key_path: str = os.path.expanduser(
-            config.get("ssh_key_path", "~/.ssh/ledmatrix_sync_rsa")
-        )
+        self.source_port: int = int(config.get("source_port", 5001))
         self.sync_plugins: bool = config.get("sync_plugins", True)
         self.sync_config: bool = config.get("sync_config", True)
         self.sync_secrets: bool = config.get("sync_secrets", False)
@@ -52,33 +140,26 @@ class PluginSyncPlugin(BasePlugin):
         self._project_root = Path(__file__).resolve().parent.parent.parent
         self._state_file = self._project_root / "config" / self._STATE_FILENAME
 
+        if self.server_mode:
+            self._start_server()
+
     # ── BasePlugin interface ──────────────────────────────────────────────────
 
     def update(self) -> None:
-        if not self.source_host:
+        if self.server_mode or not self.source_host:
             return
 
         if not self._is_sync_due():
             return
 
-        if not os.path.exists(self.ssh_key_path):
-            self._generate_ssh_key()
-            self.logger.info(
-                "Plugin sync: SSH key generated at %s — add the public key to "
-                "%s@%s:~/.ssh/authorized_keys, then the next sync will proceed.",
-                self.ssh_key_path,
-                self.source_user,
-                self.source_host,
-            )
-            return
-
-        self.logger.info("Plugin sync: starting sync from %s@%s", self.source_user, self.source_host)
+        self.logger.info(
+            "Plugin sync: starting sync from http://%s:%d", self.source_host, self.source_port
+        )
 
         if not self._check_availability():
             self.logger.warning(
-                "Plugin sync: %s@%s unreachable — skipping this cycle",
-                self.source_user,
-                self.source_host,
+                "Plugin sync: http://%s:%d unreachable — skipping this cycle",
+                self.source_host, self.source_port,
             )
             return
 
@@ -93,15 +174,41 @@ class PluginSyncPlugin(BasePlugin):
 
     def get_info(self) -> Dict[str, Any]:
         state = self._load_state()
-        return {
+        info: Dict[str, Any] = {
+            "mode": "server" if self.server_mode else "destination",
             "last_sync_time": state.get("last_sync_time", "Never"),
             "last_success": state.get("last_success"),
-            "source_host": self.source_host,
-            "public_key": self._read_public_key(),
-            "sync_due": self._is_sync_due(),
         }
+        if self.server_mode:
+            info["server_port"] = self.server_port
+        else:
+            info["source_host"] = self.source_host
+            info["source_port"] = self.source_port
+            info["sync_due"] = self._is_sync_due()
+        return info
 
-    # ── Sync orchestration ────────────────────────────────────────────────────
+    # ── Server mode ───────────────────────────────────────────────────────────
+
+    def _start_server(self) -> None:
+        try:
+            server = _SyncHTTPServer(
+                ("", self.server_port),
+                _SyncHandler,
+                plugin_root=self._project_root,
+                sync_token=self.sync_token,
+                system_keys=self._SYSTEM_KEYS,
+                preserve_keys=self._extra_preserve,
+                plugin_id=self.plugin_id,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.logger.info("Plugin sync: server listening on port %d", self.server_port)
+        except OSError as e:
+            self.logger.error(
+                "Plugin sync: failed to start server on port %d: %s", self.server_port, e
+            )
+
+    # ── Pull mode (destination) ───────────────────────────────────────────────
 
     def _is_sync_due(self) -> bool:
         last = self._load_state().get("last_sync_time")
@@ -116,22 +223,9 @@ class PluginSyncPlugin(BasePlugin):
 
     def _check_availability(self) -> bool:
         try:
-            result = subprocess.run(
-                [
-                    "ssh",
-                    "-i", self.ssh_key_path,
-                    "-o", "ConnectTimeout=3",
-                    "-o", "BatchMode=yes",
-                    "-o", "StrictHostKeyChecking=no",
-                    f"{self.source_user}@{self.source_host}",
-                    "true",
-                ],
-                capture_output=True,
-                timeout=10,
-            )
-            return result.returncode == 0
-        except Exception as e:
-            self.logger.error("Plugin sync: availability check error: %s", e)
+            self._http_get("/api/health")
+            return True
+        except Exception:
             return False
 
     def _run_sync(self) -> Tuple[bool, bool]:
@@ -139,136 +233,68 @@ class PluginSyncPlugin(BasePlugin):
         any_changes = False
 
         if self.sync_plugins:
-            local_plugins = str(self._project_root / "plugins") + "/"
-            os.makedirs(self._project_root / "plugins", exist_ok=True)
-            success, changed = self._rsync(
-                f"{self.source_user}@{self.source_host}:{self.source_path}/plugins/",
-                local_plugins,
-                exclude=[self.plugin_id],
-            )
-            results.append(success)
+            ok, changed = self._pull_plugins()
+            results.append(ok)
             any_changes |= changed
 
         if self.sync_config:
-            success, changed = self._sync_config_selective()
-            results.append(success)
+            ok, changed = self._pull_config()
+            results.append(ok)
             any_changes |= changed
 
         if self.sync_secrets:
-            success, changed = self._scp_pull_with_change_detection(
-                f"{self.source_user}@{self.source_host}:{self.source_path}/config/config_secrets.json",
-                str(self._project_root / "config" / "config_secrets.json"),
-            )
-            results.append(success)
+            ok, changed = self._pull_secrets()
+            results.append(ok)
             any_changes |= changed
 
         success = all(results) if results else True
-        if success:
-            self.logger.info("Plugin sync: completed successfully%s", " — changes detected" if any_changes else " — nothing changed")
-        else:
-            self.logger.error("Plugin sync: completed with one or more errors — check logs above")
+        suffix = " — changes detected" if any_changes else " — nothing changed"
+        (self.logger.info if success else self.logger.error)(
+            "Plugin sync: %s%s",
+            "completed successfully" if success else "completed with errors",
+            suffix,
+        )
         return success, any_changes
 
-    # ── Transfer helpers ──────────────────────────────────────────────────────
-
-    def _ssh_e_flag(self) -> str:
-        return (
-            f"ssh -i {self.ssh_key_path} "
-            "-o StrictHostKeyChecking=no "
-            "-o BatchMode=yes"
-        )
-
-    def _rsync(self, source: str, dest: str, exclude: Optional[List[str]] = None) -> Tuple[bool, bool]:
-        cmd = ["rsync", "-az", "--delete", "--itemize-changes", "-e", self._ssh_e_flag()]
-        for ex in (exclude or []):
-            cmd += ["--exclude", ex]
-        if self.dry_run:
-            cmd.append("--dry-run")
-        cmd += [source, dest]
-
+    def _pull_plugins(self) -> Tuple[bool, bool]:
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            if result.returncode != 0:
-                self.logger.error("Plugin sync: rsync failed: %s", result.stderr.strip())
+            data = self._http_get("/api/plugins")
+        except Exception as e:
+            self.logger.error("Plugin sync: failed to fetch plugins archive: %s", e)
+            return False, False
+
+        local_plugins = self._project_root / "plugins"
+        os.makedirs(local_plugins, exist_ok=True)
+        before = self._dir_snapshot(local_plugins)
+
+        if not self.dry_run:
+            try:
+                with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+                    archive_names = {m.name.split("/")[0] for m in tar.getmembers() if m.name}
+                    for item in list(local_plugins.iterdir()):
+                        if item.is_dir() and item.name not in archive_names and item.name != self.plugin_id:
+                            shutil.rmtree(item)
+                    tar.extractall(local_plugins)
+            except Exception as e:
+                self.logger.error("Plugin sync: failed to extract plugins archive: %s", e)
                 return False, False
-            changed = bool(result.stdout.strip())
-            return True, changed
-        except subprocess.TimeoutExpired:
-            self.logger.error("Plugin sync: rsync timed out after 120s")
-            return False, False
+
+        after = self._dir_snapshot(local_plugins)
+        return True, before != after
+
+    def _pull_config(self) -> Tuple[bool, bool]:
+        try:
+            source_cfg: Dict[str, Any] = json.loads(self._http_get("/api/config"))
         except Exception as e:
-            self.logger.error("Plugin sync: rsync exception: %s", e)
-            return False, False
-
-    def _scp_pull(self, source: str, dest: str) -> bool:
-        if self.dry_run:
-            self.logger.info("Plugin sync [dry-run]: would copy %s -> %s", source, dest)
-            return True
-        cmd = [
-            "scp",
-            "-i", self.ssh_key_path,
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "BatchMode=yes",
-            source,
-            dest,
-        ]
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if result.returncode != 0:
-                self.logger.error("Plugin sync: scp failed: %s", result.stderr.strip())
-                return False
-            return True
-        except Exception as e:
-            self.logger.error("Plugin sync: scp exception: %s", e)
-            return False
-
-    def _scp_pull_with_change_detection(self, source: str, dest: str) -> Tuple[bool, bool]:
-        existing_content: Optional[bytes] = None
-        try:
-            with open(dest, "rb") as f:
-                existing_content = f.read()
-        except FileNotFoundError:
-            pass
-
-        if not self._scp_pull(source, dest):
-            return False, False
-
-        if self.dry_run:
-            return True, False
-
-        try:
-            with open(dest, "rb") as f:
-                new_content = f.read()
-            return True, new_content != existing_content
-        except Exception:
-            return True, True
-
-    def _sync_config_selective(self) -> Tuple[bool, bool]:
-        """Pull source config.json and apply only plugin config sections.
-
-        System-level keys (schedule, timezone, display hardware, etc.) are always
-        kept from the local config. Only keys that are not in _SYSTEM_KEYS and not
-        in preserve_local_keys are considered plugin configs and synced from source.
-        """
-        tmp = "/tmp/ledmatrix_sync_source_config.json"
-
-        if not self._scp_pull(
-            f"{self.source_user}@{self.source_host}:{self.source_path}/config/config.json",
-            tmp,
-        ):
+            self.logger.error("Plugin sync: failed to fetch config: %s", e)
             return False, False
 
         local_path = self._project_root / "config" / "config.json"
         try:
-            with open(tmp) as f:
-                source_cfg: Dict[str, Any] = json.load(f)
             with open(local_path) as f:
-                local_cfg: Dict[str, Any] = json.load(f)
+                local_cfg = json.load(f)
 
-            # Build the full set of keys to leave untouched on this Pi
             preserve = self._SYSTEM_KEYS | self._extra_preserve | {self.plugin_id}
-
-            # Start from local config, then apply only plugin-config keys from source
             merged = dict(local_cfg)
             synced_keys: List[str] = []
             for key, value in source_cfg.items():
@@ -277,73 +303,66 @@ class PluginSyncPlugin(BasePlugin):
                     synced_keys.append(key)
 
             changed = json.dumps(merged, sort_keys=True) != json.dumps(local_cfg, sort_keys=True)
-
-            if not self.dry_run:
-                if changed:
-                    with open(local_path, "w") as f:
-                        json.dump(merged, f, indent=2)
-                    self.logger.info(
-                        "Plugin sync: config.json updated — synced plugin keys: %s", synced_keys
-                    )
-            else:
-                self.logger.info(
-                    "Plugin sync [dry-run]: would sync plugin keys: %s", synced_keys
-                )
-
+            if not self.dry_run and changed:
+                with open(local_path, "w") as f:
+                    json.dump(merged, f, indent=2)
+                self.logger.info("Plugin sync: config updated — synced keys: %s", synced_keys)
+            elif self.dry_run:
+                self.logger.info("Plugin sync [dry-run]: would sync config keys: %s", synced_keys)
             return True, changed
         except Exception as e:
             self.logger.error("Plugin sync: config merge error: %s", e)
             return False, False
-        finally:
-            if os.path.exists(tmp):
-                os.remove(tmp)
+
+    def _pull_secrets(self) -> Tuple[bool, bool]:
+        try:
+            new_data = self._http_get("/api/secrets")
+        except Exception as e:
+            self.logger.error("Plugin sync: failed to fetch secrets: %s", e)
+            return False, False
+
+        dest = self._project_root / "config" / "config_secrets.json"
+        try:
+            existing = dest.read_bytes() if dest.exists() else b""
+            changed = new_data != existing
+            if not self.dry_run and changed:
+                dest.write_bytes(new_data)
+            return True, changed
+        except Exception as e:
+            self.logger.error("Plugin sync: failed to write secrets: %s", e)
+            return False, False
+
+    # ── HTTP client ───────────────────────────────────────────────────────────
+
+    def _http_get(self, path: str) -> bytes:
+        url = f"http://{self.source_host}:{self.source_port}{path}"
+        req = urllib.request.Request(url)
+        if self.sync_token:
+            req.add_header("X-Sync-Token", self.sync_token)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read()
 
     # ── Service restart ───────────────────────────────────────────────────────
 
     def _restart_display_service(self) -> None:
-        self.logger.info("Plugin sync: restarting %s due to detected changes", self.display_service_name)
+        self.logger.info("Plugin sync: restarting %s", self.display_service_name)
         try:
             result = subprocess.run(
                 ["sudo", "systemctl", "restart", self.display_service_name],
-                capture_output=True,
-                text=True,
-                timeout=30,
+                capture_output=True, text=True, timeout=30,
             )
             if result.returncode == 0:
                 self.logger.info("Plugin sync: %s restarted successfully", self.display_service_name)
             else:
-                self.logger.error(
-                    "Plugin sync: failed to restart %s: %s",
-                    self.display_service_name,
-                    result.stderr.strip(),
-                )
+                self.logger.error("Plugin sync: restart failed: %s", result.stderr.strip())
         except Exception as e:
             self.logger.error("Plugin sync: restart exception: %s", e)
 
-    # ── SSH key helpers ───────────────────────────────────────────────────────
+    # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _generate_ssh_key(self) -> None:
-        os.makedirs(os.path.dirname(self.ssh_key_path), exist_ok=True)
-        subprocess.run(
-            [
-                "ssh-keygen",
-                "-t", "ed25519",
-                "-f", self.ssh_key_path,
-                "-N", "",
-                "-C", "ledmatrix-plugin-sync",
-            ],
-            check=True,
-            capture_output=True,
-        )
-
-    def _read_public_key(self) -> str:
-        try:
-            with open(self.ssh_key_path + ".pub") as f:
-                return f.read().strip()
-        except FileNotFoundError:
-            return ""
-
-    # ── State helpers ─────────────────────────────────────────────────────────
+    @staticmethod
+    def _dir_snapshot(path: Path) -> Dict[str, float]:
+        return {str(p.relative_to(path)): os.path.getmtime(p) for p in path.rglob("*")}
 
     def _load_state(self) -> Dict[str, Any]:
         try:

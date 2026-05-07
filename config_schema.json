@@ -15,30 +15,34 @@
       "minimum": 0,
       "maximum": 0
     },
+    "server_mode": {
+      "type": "boolean",
+      "description": "Set to true on the source Pi to serve plugins and config over HTTP. Set to false (default) on all destination Pi's that pull from the source.",
+      "default": false
+    },
+    "server_port": {
+      "type": "integer",
+      "description": "Port the sync server listens on (server mode) or connects to (destination mode)",
+      "default": 5001,
+      "minimum": 1024,
+      "maximum": 65535
+    },
+    "sync_token": {
+      "type": "string",
+      "description": "Optional shared secret for basic auth. Must be identical on the source and all destinations. Leave empty to disable (local network only).",
+      "default": ""
+    },
     "source_host": {
       "type": "string",
-      "description": "Hostname or IP address of the source LEDMatrix Pi",
+      "description": "Hostname or IP of the source Pi (destination mode only)",
       "default": ""
     },
-    "source_user": {
-      "type": "string",
-      "description": "SSH username on the source Pi",
-      "default": "pi"
-    },
-    "source_ledmatrix_path": {
-      "type": "string",
-      "description": "Absolute path to the LEDMatrix directory on the source Pi",
-      "default": "/home/pi/LEDMatrix"
-    },
-    "ssh_key_path": {
-      "type": "string",
-      "description": "Path to the shared SSH private key used to authenticate with the source Pi",
-      "default": "~/.ssh/ledmatrix_sync_rsa"
-    },
-    "source_password": {
-      "type": "string",
-      "description": "Password for the source Pi. Used once to automatically install the SSH key — can be cleared after the first successful sync.",
-      "default": ""
+    "source_port": {
+      "type": "integer",
+      "description": "Port of the sync server on the source Pi (destination mode only)",
+      "default": 5001,
+      "minimum": 1024,
+      "maximum": 65535
     },
     "sync_plugins": {
       "type": "boolean",
@@ -47,7 +51,7 @@
     },
     "sync_config": {
       "type": "boolean",
-      "description": "Sync plugin configuration from source config.json. Hardware-specific settings (display.hardware, display.runtime) are always preserved locally.",
+      "description": "Sync plugin configuration sections from source config.json. Hardware settings, schedule, timezone, and other Pi-specific keys are always preserved locally.",
       "default": true
     },
     "sync_secrets": {
@@ -57,7 +61,7 @@
     },
     "sync_frequency_hours": {
       "type": "number",
-      "description": "How many hours between syncs",
+      "description": "Hours between scheduled syncs",
       "default": 24,
       "enum": [1, 6, 12, 24, 48, 168]
     },
@@ -65,12 +69,6 @@
       "type": "boolean",
       "description": "Log what would be synced without making any changes",
       "default": false
-    },
-    "preserve_local_keys": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "Additional top-level config.json keys to always keep from local (never overwrite from source). The following are always preserved regardless of this setting: display, schedule, dim_schedule, timezone, location, web_display_autostart, plugin_system, plugin-sync.",
-      "default": []
     },
     "auto_restart": {
       "type": "boolean",
@@ -81,6 +79,12 @@
       "type": "string",
       "description": "Name of the systemd service to restart when changes are detected",
       "default": "ledmatrix.service"
+    },
+    "preserve_local_keys": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Additional top-level config.json keys to always keep from local and never overwrite from source. The following are always preserved regardless: display, schedule, dim_schedule, timezone, location, web_display_autostart, plugin_system, plugin-sync.",
+      "default": []
     }
   },
   "additionalProperties": false

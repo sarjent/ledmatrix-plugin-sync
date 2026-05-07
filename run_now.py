@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Run Now action script for plugin-sync.
-Executed by the LEDMatrix web UI when the user clicks "Run Sync Now".
-Reads plugin config, performs an immediate sync, and restarts the display
-service if changes are detected.
+Run Now action for plugin-sync (destination mode).
+Immediately fetches plugins and config from the source Pi's HTTP sync server.
 """
+import io
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tarfile
+import urllib.error
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -18,180 +21,104 @@ SYSTEM_KEYS = frozenset({
     "location", "web_display_autostart", "plugin_system",
 })
 
+PLUGIN_ID = "plugin-sync"
+
 
 def load_config(ledmatrix_root: Path) -> dict:
     with open(ledmatrix_root / "config" / "config.json") as f:
-        return json.load(f).get("plugin-sync", {})
+        return json.load(f).get(PLUGIN_ID, {})
 
 
-def ensure_sshpass() -> bool:
-    if subprocess.run(["which", "sshpass"], capture_output=True).returncode == 0:
-        return True
-    print("Installing sshpass...")
-    result = subprocess.run(
-        ["sudo", "apt-get", "install", "-y", "sshpass"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        print(f"ERROR: Could not install sshpass: {result.stderr.strip()}", file=sys.stderr)
-        return False
-    return True
+def http_get(host: str, port: int, path: str, token: str = "") -> bytes:
+    url = f"http://{host}:{port}{path}"
+    req = urllib.request.Request(url)
+    if token:
+        req.add_header("X-Sync-Token", token)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read()
 
 
-def install_public_key(ssh_key: str, user: str, host: str, password: str) -> bool:
-    if not ensure_sshpass():
-        return False
-    print(f"Installing public key on {user}@{host}...")
-    result = subprocess.run(
-        [
-            "sshpass", "-p", password,
-            "ssh-copy-id",
-            "-i", ssh_key + ".pub",
-            "-o", "StrictHostKeyChecking=no",
-            f"{user}@{host}",
-        ],
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode != 0:
-        print(f"ERROR: Key installation failed: {result.stderr.strip()}", file=sys.stderr)
-        return False
-    print("Public key installed successfully.")
-    return True
-
-
-def check_availability(ssh_key: str, user: str, host: str) -> bool:
-    result = subprocess.run(
-        [
-            "ssh", "-i", ssh_key,
-            "-o", "ConnectTimeout=5",
-            "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=no",
-            f"{user}@{host}", "true",
-        ],
-        capture_output=True,
-        timeout=15,
-    )
-    return result.returncode == 0
-
-
-def sync_plugins(ssh_key: str, user: str, host: str, source_path: str,
-                 local_root: Path) -> bool:
-    dest = str(local_root / "plugins") + "/"
-    os.makedirs(local_root / "plugins", exist_ok=True)
-    ssh_e = f"ssh -i {ssh_key} -o StrictHostKeyChecking=no -o BatchMode=yes"
-    result = subprocess.run(
-        [
-            "rsync", "-az", "--delete", "--itemize-changes",
-            "-e", ssh_e,
-            "--exclude", "plugin-sync",
-            f"{user}@{host}:{source_path}/plugins/",
-            dest,
-        ],
-        capture_output=True, text=True, timeout=120,
-    )
-    if result.returncode != 0:
-        print(f"ERROR syncing plugins: {result.stderr.strip()}", file=sys.stderr)
-        return False
-    if result.stdout.strip():
-        print(f"Plugins updated:\n{result.stdout.strip()}")
-        return True
-    print("Plugins: no changes")
-    return False
-
-
-def sync_config(ssh_key: str, user: str, host: str, source_path: str,
-                local_root: Path, preserve_extra: list) -> bool:
-    tmp = "/tmp/ledmatrix_sync_run_now_config.json"
-    ssh_e = f"ssh -i {ssh_key} -o StrictHostKeyChecking=no -o BatchMode=yes"
-    result = subprocess.run(
-        [
-            "scp", "-i", ssh_key,
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "BatchMode=yes",
-            f"{user}@{host}:{source_path}/config/config.json",
-            tmp,
-        ],
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode != 0:
-        print(f"ERROR fetching config.json: {result.stderr.strip()}", file=sys.stderr)
-        return False
-
-    local_path = local_root / "config" / "config.json"
+def check_availability(host: str, port: int, token: str) -> bool:
     try:
-        with open(tmp) as f:
-            source_cfg = json.load(f)
-        with open(local_path) as f:
-            local_cfg = json.load(f)
+        http_get(host, port, "/api/health", token)
+        return True
+    except Exception:
+        return False
 
-        preserve = SYSTEM_KEYS | set(preserve_extra) | {"plugin-sync"}
-        merged = dict(local_cfg)
-        synced_keys = []
-        for key, value in source_cfg.items():
-            if key not in preserve:
-                merged[key] = value
-                synced_keys.append(key)
 
-        if json.dumps(merged, sort_keys=True) == json.dumps(local_cfg, sort_keys=True):
-            print("Config: no changes")
-            return False
+def sync_plugins(host: str, port: int, token: str, local_root: Path) -> bool:
+    data = http_get(host, port, "/api/plugins", token)
+    local_plugins = local_root / "plugins"
+    os.makedirs(local_plugins, exist_ok=True)
 
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        archive_names = {m.name.split("/")[0] for m in tar.getmembers() if m.name}
+        removed = []
+        for item in list(local_plugins.iterdir()):
+            if item.is_dir() and item.name not in archive_names and item.name != PLUGIN_ID:
+                shutil.rmtree(item)
+                removed.append(item.name)
+        tar.extractall(local_plugins)
+
+    if archive_names:
+        print(f"Plugins synced: {sorted(archive_names)}")
+    if removed:
+        print(f"Plugins removed: {removed}")
+    return True
+
+
+def sync_config(host: str, port: int, token: str, local_root: Path, preserve_extra: list) -> bool:
+    source_cfg = json.loads(http_get(host, port, "/api/config", token))
+    local_path = local_root / "config" / "config.json"
+
+    with open(local_path) as f:
+        local_cfg = json.load(f)
+
+    preserve = SYSTEM_KEYS | set(preserve_extra) | {PLUGIN_ID}
+    merged = dict(local_cfg)
+    synced_keys = []
+    for key, value in source_cfg.items():
+        if key not in preserve:
+            merged[key] = value
+            synced_keys.append(key)
+
+    changed = json.dumps(merged, sort_keys=True) != json.dumps(local_cfg, sort_keys=True)
+    if changed:
         with open(local_path, "w") as f:
             json.dump(merged, f, indent=2)
         print(f"Config updated — synced keys: {synced_keys}")
-        return True
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+    else:
+        print("Config: no changes")
+    return changed
 
 
-def sync_secrets(ssh_key: str, user: str, host: str, source_path: str,
-                 local_root: Path) -> bool:
-    dest = str(local_root / "config" / "config_secrets.json")
-    try:
-        with open(dest, "rb") as f:
-            existing = f.read()
-    except FileNotFoundError:
-        existing = None
-
-    result = subprocess.run(
-        [
-            "scp", "-i", ssh_key,
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "BatchMode=yes",
-            f"{user}@{host}:{source_path}/config/config_secrets.json",
-            dest,
-        ],
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode != 0:
-        print(f"ERROR syncing secrets: {result.stderr.strip()}", file=sys.stderr)
-        return False
-
-    with open(dest, "rb") as f:
-        new_content = f.read()
-    if new_content != existing:
+def sync_secrets(host: str, port: int, token: str, local_root: Path) -> bool:
+    data = http_get(host, port, "/api/secrets", token)
+    dest = local_root / "config" / "config_secrets.json"
+    existing = dest.read_bytes() if dest.exists() else b""
+    if data != existing:
+        dest.write_bytes(data)
         print("Secrets: updated")
         return True
     print("Secrets: no changes")
     return False
 
 
-def update_state(ledmatrix_root: Path, success: bool) -> None:
-    state_file = ledmatrix_root / "config" / "plugin_sync_state.json"
+def update_state(local_root: Path) -> None:
+    state_file = local_root / "config" / "plugin_sync_state.json"
     try:
         with open(state_file) as f:
             state = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         state = {}
     state["last_sync_time"] = datetime.now().isoformat()
-    state["last_success"] = success
+    state["last_success"] = True
     with open(state_file, "w") as f:
         json.dump(state, f, indent=2)
 
 
 def restart_service(service_name: str) -> None:
-    print(f"Changes detected — restarting {service_name}...")
+    print(f"Restarting {service_name}...")
     result = subprocess.run(
         ["sudo", "systemctl", "restart", service_name],
         capture_output=True, text=True, timeout=30,
@@ -199,7 +126,7 @@ def restart_service(service_name: str) -> None:
     if result.returncode == 0:
         print(f"{service_name} restarted successfully")
     else:
-        print(f"WARNING: failed to restart {service_name}: {result.stderr.strip()}", file=sys.stderr)
+        print(f"WARNING: restart failed: {result.stderr.strip()}", file=sys.stderr)
 
 
 def main() -> None:
@@ -211,11 +138,13 @@ def main() -> None:
         print(f"ERROR loading config: {e}", file=sys.stderr)
         sys.exit(1)
 
+    if cfg.get("server_mode", False):
+        print("This Pi is configured as the sync source — nothing to pull.")
+        sys.exit(0)
+
     source_host = cfg.get("source_host", "")
-    source_user = cfg.get("source_user", "pi")
-    source_path = cfg.get("source_ledmatrix_path", "/home/pi/LEDMatrix")
-    ssh_key = os.path.expanduser(cfg.get("ssh_key_path", "~/.ssh/ledmatrix_sync_rsa"))
-    source_password = cfg.get("source_password", "")
+    source_port = int(cfg.get("source_port", 5001))
+    sync_token = cfg.get("sync_token", "")
     do_plugins = cfg.get("sync_plugins", True)
     do_config = cfg.get("sync_config", True)
     do_secrets = cfg.get("sync_secrets", False)
@@ -227,52 +156,36 @@ def main() -> None:
         print("ERROR: source_host is not configured.", file=sys.stderr)
         sys.exit(1)
 
-    if not os.path.exists(ssh_key):
-        print(f"SSH key not found at {ssh_key} — generating now...")
-        key_dir = os.path.dirname(ssh_key)
-        os.makedirs(key_dir, exist_ok=True)
-        result = subprocess.run(
-            ["ssh-keygen", "-t", "ed25519", "-f", ssh_key, "-N", "", "-C", "ledmatrix-plugin-sync"],
-            capture_output=True, text=True,
+    print(f"Connecting to http://{source_host}:{source_port}...")
+    if not check_availability(source_host, source_port, sync_token):
+        print(
+            f"ERROR: Cannot reach {source_host}:{source_port}. "
+            "Make sure plugin-sync is installed on the source Pi with server_mode: true.",
+            file=sys.stderr,
         )
-        if result.returncode != 0:
-            print(f"ERROR: Failed to generate SSH key: {result.stderr.strip()}", file=sys.stderr)
-            sys.exit(1)
-        print("SSH key generated.")
-
-    print(f"Connecting to {source_user}@{source_host}...")
-    if not check_availability(ssh_key, source_user, source_host):
-        if source_password:
-            if not install_public_key(ssh_key, source_user, source_host, source_password):
-                sys.exit(1)
-            print(f"Retrying connection...")
-            if not check_availability(ssh_key, source_user, source_host):
-                print(f"ERROR: Still cannot reach {source_host} after key installation.", file=sys.stderr)
-                sys.exit(1)
-        else:
-            pub_key_path = ssh_key + ".pub"
-            pub_key = ""
-            if os.path.exists(pub_key_path):
-                with open(pub_key_path) as f:
-                    pub_key = f.read().strip()
-            print(f"ERROR: Cannot reach {source_host}. Set source_password in config to install the key automatically, or add this key manually to {source_user}@{source_host}:~/.ssh/authorized_keys:", file=sys.stderr)
-            if pub_key:
-                print(f"\n{pub_key}\n", file=sys.stderr)
-            sys.exit(1)
+        sys.exit(1)
     print("Connection OK")
 
     any_changes = False
 
-    if do_plugins:
-        any_changes |= sync_plugins(ssh_key, source_user, source_host, source_path, ledmatrix_root)
+    try:
+        if do_plugins:
+            any_changes |= sync_plugins(source_host, source_port, sync_token, ledmatrix_root)
 
-    if do_config:
-        any_changes |= sync_config(ssh_key, source_user, source_host, source_path, ledmatrix_root, preserve_extra)
+        if do_config:
+            any_changes |= sync_config(source_host, source_port, sync_token, ledmatrix_root, preserve_extra)
 
-    if do_secrets:
-        any_changes |= sync_secrets(ssh_key, source_user, source_host, source_path, ledmatrix_root)
+        if do_secrets:
+            any_changes |= sync_secrets(source_host, source_port, sync_token, ledmatrix_root)
 
-    update_state(ledmatrix_root, success=True)
+    except urllib.error.URLError as e:
+        print(f"ERROR: Connection failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    update_state(ledmatrix_root)
 
     if any_changes and auto_restart:
         restart_service(service_name)
