@@ -1,7 +1,7 @@
 {
   "id": "plugin-sync",
   "name": "Plugin Sync",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Shane",
   "description": "Pulls plugins and configuration from a source LEDMatrix Pi on a configurable schedule. Runs silently in the background and never occupies display time.",
   "entry_point": "manager.py",
@@ -10,5 +10,19 @@
   "tags": ["sync", "system", "admin"],
   "display_modes": ["plugin_sync"],
   "update_interval": 300,
-  "default_duration": 0
+  "default_duration": 0,
+  "web_ui_actions": [
+    {
+      "id": "run-now",
+      "type": "script",
+      "title": "Manual Sync",
+      "description": "Immediately sync plugins and configuration from the source Pi",
+      "button_text": "Run Sync Now",
+      "icon": "fas fa-sync",
+      "color": "green",
+      "script": "run_now.py",
+      "success_message": "Sync completed successfully",
+      "error_message": "Sync failed — check output for details"
+    }
+  ]
 }

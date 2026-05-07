@@ -11,6 +11,7 @@ Silently keeps plugins and plugin configuration in sync across multiple LEDMatri
 - **Safe config merge** — only plugin config sections are synced; hardware settings, schedule, timezone, location, and other Pi-specific keys are always preserved locally
 - **Availability check** — if the source is unreachable, the sync is skipped cleanly with no errors
 - **Dry run mode** — log exactly what would change without touching anything
+- **Run Now button** — trigger an immediate sync from the plugin's settings page in the web UI without waiting for the next scheduled cycle
 - **Auto-restart** — automatically restarts the display service when changes are detected, so new plugins load immediately
 - **Zero display time** — runs entirely in the background, never interrupts your display rotation
 
