@@ -24,6 +24,41 @@ def load_config(ledmatrix_root: Path) -> dict:
         return json.load(f).get("plugin-sync", {})
 
 
+def ensure_sshpass() -> bool:
+    if subprocess.run(["which", "sshpass"], capture_output=True).returncode == 0:
+        return True
+    print("Installing sshpass...")
+    result = subprocess.run(
+        ["sudo", "apt-get", "install", "-y", "sshpass"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"ERROR: Could not install sshpass: {result.stderr.strip()}", file=sys.stderr)
+        return False
+    return True
+
+
+def install_public_key(ssh_key: str, user: str, host: str, password: str) -> bool:
+    if not ensure_sshpass():
+        return False
+    print(f"Installing public key on {user}@{host}...")
+    result = subprocess.run(
+        [
+            "sshpass", "-p", password,
+            "ssh-copy-id",
+            "-i", ssh_key + ".pub",
+            "-o", "StrictHostKeyChecking=no",
+            f"{user}@{host}",
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        print(f"ERROR: Key installation failed: {result.stderr.strip()}", file=sys.stderr)
+        return False
+    print("Public key installed successfully.")
+    return True
+
+
 def check_availability(ssh_key: str, user: str, host: str) -> bool:
     result = subprocess.run(
         [
@@ -180,6 +215,7 @@ def main() -> None:
     source_user = cfg.get("source_user", "pi")
     source_path = cfg.get("source_ledmatrix_path", "/home/pi/LEDMatrix")
     ssh_key = os.path.expanduser(cfg.get("ssh_key_path", "~/.ssh/ledmatrix_sync_rsa"))
+    source_password = cfg.get("source_password", "")
     do_plugins = cfg.get("sync_plugins", True)
     do_config = cfg.get("sync_config", True)
     do_secrets = cfg.get("sync_secrets", False)
@@ -202,18 +238,27 @@ def main() -> None:
         if result.returncode != 0:
             print(f"ERROR: Failed to generate SSH key: {result.stderr.strip()}", file=sys.stderr)
             sys.exit(1)
-        print(f"SSH key generated.")
-
-    pub_key_path = ssh_key + ".pub"
-    if os.path.exists(pub_key_path):
-        with open(pub_key_path) as f:
-            pub_key = f.read().strip()
-        print(f"\nPublic key (add this to {source_user}@{source_host}:~/.ssh/authorized_keys if not already done):\n{pub_key}\n")
+        print("SSH key generated.")
 
     print(f"Connecting to {source_user}@{source_host}...")
     if not check_availability(ssh_key, source_user, source_host):
-        print(f"ERROR: Cannot reach {source_host}. If the key was just generated, add the public key above to the source Pi's authorized_keys and try again.", file=sys.stderr)
-        sys.exit(1)
+        if source_password:
+            if not install_public_key(ssh_key, source_user, source_host, source_password):
+                sys.exit(1)
+            print(f"Retrying connection...")
+            if not check_availability(ssh_key, source_user, source_host):
+                print(f"ERROR: Still cannot reach {source_host} after key installation.", file=sys.stderr)
+                sys.exit(1)
+        else:
+            pub_key_path = ssh_key + ".pub"
+            pub_key = ""
+            if os.path.exists(pub_key_path):
+                with open(pub_key_path) as f:
+                    pub_key = f.read().strip()
+            print(f"ERROR: Cannot reach {source_host}. Set source_password in config to install the key automatically, or add this key manually to {source_user}@{source_host}:~/.ssh/authorized_keys:", file=sys.stderr)
+            if pub_key:
+                print(f"\n{pub_key}\n", file=sys.stderr)
+            sys.exit(1)
     print("Connection OK")
 
     any_changes = False

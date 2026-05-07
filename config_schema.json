@@ -35,6 +35,11 @@
       "description": "Path to the shared SSH private key used to authenticate with the source Pi",
       "default": "~/.ssh/ledmatrix_sync_rsa"
     },
+    "source_password": {
+      "type": "string",
+      "description": "Password for the source Pi. Used once to automatically install the SSH key — can be cleared after the first successful sync.",
+      "default": ""
+    },
     "sync_plugins": {
       "type": "boolean",
       "description": "Sync the plugins/ directory from source",

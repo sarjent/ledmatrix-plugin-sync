@@ -27,9 +27,9 @@ https://github.com/sarjent/ledmatrix-plugin-sync
 
 After installing on each destination Pi:
 
-1. Enable the plugin and set `source_host`, `source_user`, and `source_ledmatrix_path` in the web UI
-2. On the next update cycle the plugin generates an SSH key and logs the public key
-3. Copy that public key into `~/.ssh/authorized_keys` on the source Pi — this only needs to be done once and all destinations share the same key
+1. Enable the plugin and set `source_host`, `source_user`, `source_ledmatrix_path`, and `source_password` in the web UI
+2. Click **Run Sync Now** — the plugin generates an SSH key, installs it on the source Pi automatically using the password, then proceeds with the first sync
+3. Once the first sync completes successfully, clear `source_password` from the config — it is no longer needed
 
 ## Configuration
 
@@ -39,6 +39,7 @@ After installing on each destination Pi:
 | `source_host` | string | `""` | Hostname or IP of the source LEDMatrix Pi |
 | `source_user` | string | `"pi"` | SSH username on the source Pi |
 | `source_ledmatrix_path` | string | `"/home/pi/LEDMatrix"` | Absolute path to LEDMatrix on the source Pi |
+| `source_password` | string | `""` | Password for the source Pi — used once to auto-install the SSH key, then can be cleared |
 | `ssh_key_path` | string | `"~/.ssh/ledmatrix_sync_rsa"` | Path to the shared SSH private key |
 | `sync_plugins` | boolean | `true` | Sync the `plugins/` directory from source |
 | `sync_config` | boolean | `true` | Sync plugin configuration sections from source `config.json` |
