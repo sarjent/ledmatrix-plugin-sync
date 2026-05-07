@@ -192,12 +192,27 @@ def main() -> None:
         sys.exit(1)
 
     if not os.path.exists(ssh_key):
-        print(f"ERROR: SSH key not found at {ssh_key}. Enable the plugin once to generate it.", file=sys.stderr)
-        sys.exit(1)
+        print(f"SSH key not found at {ssh_key} — generating now...")
+        key_dir = os.path.dirname(ssh_key)
+        os.makedirs(key_dir, exist_ok=True)
+        result = subprocess.run(
+            ["ssh-keygen", "-t", "ed25519", "-f", ssh_key, "-N", "", "-C", "ledmatrix-plugin-sync"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"ERROR: Failed to generate SSH key: {result.stderr.strip()}", file=sys.stderr)
+            sys.exit(1)
+        print(f"SSH key generated.")
+
+    pub_key_path = ssh_key + ".pub"
+    if os.path.exists(pub_key_path):
+        with open(pub_key_path) as f:
+            pub_key = f.read().strip()
+        print(f"\nPublic key (add this to {source_user}@{source_host}:~/.ssh/authorized_keys if not already done):\n{pub_key}\n")
 
     print(f"Connecting to {source_user}@{source_host}...")
     if not check_availability(ssh_key, source_user, source_host):
-        print(f"ERROR: Cannot reach {source_host}. Check that it is online and the SSH key is installed.", file=sys.stderr)
+        print(f"ERROR: Cannot reach {source_host}. If the key was just generated, add the public key above to the source Pi's authorized_keys and try again.", file=sys.stderr)
         sys.exit(1)
     print("Connection OK")
 
