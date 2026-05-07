@@ -1,0 +1,2 @@
+# No third-party dependencies — uses stdlib only (subprocess, json, pathlib, datetime)
+# Requires rsync and openssh-client to be installed on the Pi (present by default on Raspberry Pi OS)

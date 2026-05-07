@@ -1,0 +1,72 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "title": "Plugin Sync Configuration",
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "description": "Enable or disable the plugin",
+      "default": true
+    },
+    "display_duration": {
+      "type": "number",
+      "description": "Keep at 0 — this plugin never occupies display time",
+      "default": 0,
+      "minimum": 0,
+      "maximum": 0
+    },
+    "source_host": {
+      "type": "string",
+      "description": "Hostname or IP address of the source LEDMatrix Pi",
+      "default": ""
+    },
+    "source_user": {
+      "type": "string",
+      "description": "SSH username on the source Pi",
+      "default": "pi"
+    },
+    "source_ledmatrix_path": {
+      "type": "string",
+      "description": "Absolute path to the LEDMatrix directory on the source Pi",
+      "default": "/home/pi/LEDMatrix"
+    },
+    "ssh_key_path": {
+      "type": "string",
+      "description": "Path to the shared SSH private key used to authenticate with the source Pi",
+      "default": "~/.ssh/ledmatrix_sync_rsa"
+    },
+    "sync_plugins": {
+      "type": "boolean",
+      "description": "Sync the plugins/ directory from source",
+      "default": true
+    },
+    "sync_config": {
+      "type": "boolean",
+      "description": "Sync plugin configuration from source config.json. Hardware-specific settings (display.hardware, display.runtime) are always preserved locally.",
+      "default": true
+    },
+    "sync_secrets": {
+      "type": "boolean",
+      "description": "Sync config_secrets.json (API keys) from source",
+      "default": false
+    },
+    "sync_frequency_hours": {
+      "type": "number",
+      "description": "How many hours between syncs",
+      "default": 24,
+      "enum": [1, 6, 12, 24, 48, 168]
+    },
+    "dry_run": {
+      "type": "boolean",
+      "description": "Log what would be synced without making any changes",
+      "default": false
+    },
+    "preserve_local_keys": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Additional top-level config.json keys to always keep from local (never overwrite from source). The following are always preserved regardless of this setting: display, schedule, dim_schedule, timezone, location, web_display_autostart, plugin_system, plugin-sync.",
+      "default": []
+    }
+  },
+  "additionalProperties": false
+}

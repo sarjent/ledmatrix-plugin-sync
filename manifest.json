@@ -1,0 +1,14 @@
+{
+  "id": "plugin-sync",
+  "name": "Plugin Sync",
+  "version": "1.0.0",
+  "author": "Shane",
+  "description": "Pulls plugins and configuration from a source LEDMatrix Pi on a configurable schedule. Runs silently in the background and never occupies display time.",
+  "entry_point": "manager.py",
+  "class_name": "PluginSyncPlugin",
+  "category": "system",
+  "tags": ["sync", "system", "admin"],
+  "display_modes": ["plugin_sync"],
+  "update_interval": 300,
+  "default_duration": 0
+}
