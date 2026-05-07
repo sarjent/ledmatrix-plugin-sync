@@ -10,10 +10,9 @@
     },
     "display_duration": {
       "type": "number",
-      "description": "Keep at 0 — this plugin never occupies display time",
-      "default": 0,
-      "minimum": 0,
-      "maximum": 0
+      "description": "Display duration in seconds. Set to 0.1 — the display() method is a no-op so the matrix is unaffected.",
+      "default": 0.1,
+      "minimum": 0.1
     },
     "server_mode": {
       "type": "boolean",
