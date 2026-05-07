@@ -7,6 +7,7 @@ import io
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
@@ -147,12 +148,24 @@ def main() -> None:
         print(f"ERROR loading config: {e}", file=sys.stderr)
         sys.exit(1)
 
-    if cfg.get("server_mode", False):
-        print("This Pi is configured as the sync source — nothing to pull.")
+    server_port = int(cfg.get("server_port", 5001))
+
+    def is_source() -> bool:
+        if cfg.get("server_mode", False):
+            return True
+        try:
+            with socket.create_connection(("localhost", server_port), timeout=1):
+                return True
+        except OSError:
+            return False
+
+    if is_source():
+        print(f"This Pi is the sync source (server running on port {server_port}) — nothing to pull.")
+        print("Run Sync Now is only used on destination Pi's.")
         sys.exit(0)
 
     source_host = cfg.get("source_host", "")
-    source_port = int(cfg.get("source_port", 5001))
+    source_port = int(cfg.get("source_port", server_port))
     sync_token = cfg.get("sync_token", "")
     do_plugins = cfg.get("sync_plugins", True)
     do_config = cfg.get("sync_config", True)
