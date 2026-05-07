@@ -62,7 +62,10 @@ def sync_plugins(host: str, port: int, token: str, local_root: Path) -> bool:
             if item.is_dir() and item.name not in archive_names and item.name != PLUGIN_ID:
                 shutil.rmtree(item)
                 removed.append(item.name)
-        tar.extractall(local_plugins)
+        try:
+            tar.extractall(local_plugins, filter="data")
+        except TypeError:
+            tar.extractall(local_plugins)
 
     if archive_names:
         print(f"Plugins synced: {sorted(archive_names)}")
@@ -109,16 +112,18 @@ def sync_secrets(host: str, port: int, token: str, local_root: Path) -> bool:
 
 
 def update_state(local_root: Path) -> None:
-    state_file = local_root / "config" / "plugin_sync_state.json"
-    try:
-        with open(state_file) as f:
-            state = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        state = {}
-    state["last_sync_time"] = datetime.now().isoformat()
-    state["last_success"] = True
-    with open(state_file, "w") as f:
-        json.dump(state, f, indent=2)
+    for state_file in [
+        local_root / "config" / "plugin_sync_state.json",
+        Path("/tmp/plugin_sync_state.json"),
+    ]:
+        try:
+            existing = json.loads(state_file.read_text()) if state_file.exists() else {}
+            existing["last_sync_time"] = datetime.now().isoformat()
+            existing["last_success"] = True
+            state_file.write_text(json.dumps(existing, indent=2))
+            return
+        except PermissionError:
+            continue
 
 
 def restart_service(service_name: str) -> None:

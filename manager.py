@@ -278,7 +278,10 @@ class PluginSyncPlugin(BasePlugin):
                     for item in list(local_plugins.iterdir()):
                         if item.is_dir() and item.name not in archive_names and item.name != self.plugin_id:
                             shutil.rmtree(item)
-                    tar.extractall(local_plugins)
+                    try:
+                        tar.extractall(local_plugins, filter="data")
+                    except TypeError:
+                        tar.extractall(local_plugins)
             except Exception as e:
                 self.logger.error("Plugin sync: failed to extract plugins archive: %s", e)
                 return False, False
