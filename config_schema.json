@@ -66,6 +66,16 @@
       "items": { "type": "string" },
       "description": "Additional top-level config.json keys to always keep from local (never overwrite from source). The following are always preserved regardless of this setting: display, schedule, dim_schedule, timezone, location, web_display_autostart, plugin_system, plugin-sync.",
       "default": []
+    },
+    "auto_restart": {
+      "type": "boolean",
+      "description": "Automatically restart the display service when changes are detected after a sync",
+      "default": true
+    },
+    "display_service_name": {
+      "type": "string",
+      "description": "Name of the systemd service to restart when changes are detected",
+      "default": "ledmatrix.service"
     }
   },
   "additionalProperties": false

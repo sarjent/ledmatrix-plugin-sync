@@ -3,7 +3,7 @@ import os
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.plugin_system.base_plugin import BasePlugin
 
@@ -45,6 +45,8 @@ class PluginSyncPlugin(BasePlugin):
         self.sync_secrets: bool = config.get("sync_secrets", False)
         self.sync_frequency_hours: float = float(config.get("sync_frequency_hours", 24))
         self.dry_run: bool = config.get("dry_run", False)
+        self.auto_restart: bool = config.get("auto_restart", True)
+        self.display_service_name: str = config.get("display_service_name", "ledmatrix.service")
         self._extra_preserve: frozenset = frozenset(config.get("preserve_local_keys", []))
 
         self._project_root = Path(__file__).resolve().parent.parent.parent
@@ -80,8 +82,11 @@ class PluginSyncPlugin(BasePlugin):
             )
             return
 
-        success = self._run_sync()
+        success, any_changes = self._run_sync()
         self._update_state({"last_sync_time": datetime.now().isoformat(), "last_success": success})
+
+        if success and any_changes and self.auto_restart:
+            self._restart_display_service()
 
     def display(self, force_clear: bool = False) -> None:
         pass
@@ -129,37 +134,40 @@ class PluginSyncPlugin(BasePlugin):
             self.logger.error("Plugin sync: availability check error: %s", e)
             return False
 
-    def _run_sync(self) -> bool:
+    def _run_sync(self) -> Tuple[bool, bool]:
         results: List[bool] = []
+        any_changes = False
 
         if self.sync_plugins:
             local_plugins = str(self._project_root / "plugins") + "/"
             os.makedirs(self._project_root / "plugins", exist_ok=True)
-            results.append(
-                self._rsync(
-                    f"{self.source_user}@{self.source_host}:{self.source_path}/plugins/",
-                    local_plugins,
-                    exclude=[self.plugin_id],
-                )
+            success, changed = self._rsync(
+                f"{self.source_user}@{self.source_host}:{self.source_path}/plugins/",
+                local_plugins,
+                exclude=[self.plugin_id],
             )
+            results.append(success)
+            any_changes |= changed
 
         if self.sync_config:
-            results.append(self._sync_config_selective())
+            success, changed = self._sync_config_selective()
+            results.append(success)
+            any_changes |= changed
 
         if self.sync_secrets:
-            results.append(
-                self._scp_pull(
-                    f"{self.source_user}@{self.source_host}:{self.source_path}/config/config_secrets.json",
-                    str(self._project_root / "config" / "config_secrets.json"),
-                )
+            success, changed = self._scp_pull_with_change_detection(
+                f"{self.source_user}@{self.source_host}:{self.source_path}/config/config_secrets.json",
+                str(self._project_root / "config" / "config_secrets.json"),
             )
+            results.append(success)
+            any_changes |= changed
 
         success = all(results) if results else True
         if success:
-            self.logger.info("Plugin sync: completed successfully")
+            self.logger.info("Plugin sync: completed successfully%s", " — changes detected" if any_changes else " — nothing changed")
         else:
             self.logger.error("Plugin sync: completed with one or more errors — check logs above")
-        return success
+        return success, any_changes
 
     # ── Transfer helpers ──────────────────────────────────────────────────────
 
@@ -170,8 +178,8 @@ class PluginSyncPlugin(BasePlugin):
             "-o BatchMode=yes"
         )
 
-    def _rsync(self, source: str, dest: str, exclude: Optional[List[str]] = None) -> bool:
-        cmd = ["rsync", "-az", "--delete", "-e", self._ssh_e_flag()]
+    def _rsync(self, source: str, dest: str, exclude: Optional[List[str]] = None) -> Tuple[bool, bool]:
+        cmd = ["rsync", "-az", "--delete", "--itemize-changes", "-e", self._ssh_e_flag()]
         for ex in (exclude or []):
             cmd += ["--exclude", ex]
         if self.dry_run:
@@ -182,14 +190,15 @@ class PluginSyncPlugin(BasePlugin):
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode != 0:
                 self.logger.error("Plugin sync: rsync failed: %s", result.stderr.strip())
-                return False
-            return True
+                return False, False
+            changed = bool(result.stdout.strip())
+            return True, changed
         except subprocess.TimeoutExpired:
             self.logger.error("Plugin sync: rsync timed out after 120s")
-            return False
+            return False, False
         except Exception as e:
             self.logger.error("Plugin sync: rsync exception: %s", e)
-            return False
+            return False, False
 
     def _scp_pull(self, source: str, dest: str) -> bool:
         if self.dry_run:
@@ -213,7 +222,28 @@ class PluginSyncPlugin(BasePlugin):
             self.logger.error("Plugin sync: scp exception: %s", e)
             return False
 
-    def _sync_config_selective(self) -> bool:
+    def _scp_pull_with_change_detection(self, source: str, dest: str) -> Tuple[bool, bool]:
+        existing_content: Optional[bytes] = None
+        try:
+            with open(dest, "rb") as f:
+                existing_content = f.read()
+        except FileNotFoundError:
+            pass
+
+        if not self._scp_pull(source, dest):
+            return False, False
+
+        if self.dry_run:
+            return True, False
+
+        try:
+            with open(dest, "rb") as f:
+                new_content = f.read()
+            return True, new_content != existing_content
+        except Exception:
+            return True, True
+
+    def _sync_config_selective(self) -> Tuple[bool, bool]:
         """Pull source config.json and apply only plugin config sections.
 
         System-level keys (schedule, timezone, display hardware, etc.) are always
@@ -226,7 +256,7 @@ class PluginSyncPlugin(BasePlugin):
             f"{self.source_user}@{self.source_host}:{self.source_path}/config/config.json",
             tmp,
         ):
-            return False
+            return False, False
 
         local_path = self._project_root / "config" / "config.json"
         try:
@@ -246,25 +276,49 @@ class PluginSyncPlugin(BasePlugin):
                     merged[key] = value
                     synced_keys.append(key)
 
+            changed = json.dumps(merged, sort_keys=True) != json.dumps(local_cfg, sort_keys=True)
+
             if not self.dry_run:
-                with open(local_path, "w") as f:
-                    json.dump(merged, f, indent=2)
-                self.logger.info(
-                    "Plugin sync: config.json updated — synced plugin keys: %s",
-                    synced_keys,
-                )
+                if changed:
+                    with open(local_path, "w") as f:
+                        json.dump(merged, f, indent=2)
+                    self.logger.info(
+                        "Plugin sync: config.json updated — synced plugin keys: %s", synced_keys
+                    )
             else:
                 self.logger.info(
                     "Plugin sync [dry-run]: would sync plugin keys: %s", synced_keys
                 )
 
-            return True
+            return True, changed
         except Exception as e:
             self.logger.error("Plugin sync: config merge error: %s", e)
-            return False
+            return False, False
         finally:
             if os.path.exists(tmp):
                 os.remove(tmp)
+
+    # ── Service restart ───────────────────────────────────────────────────────
+
+    def _restart_display_service(self) -> None:
+        self.logger.info("Plugin sync: restarting %s due to detected changes", self.display_service_name)
+        try:
+            result = subprocess.run(
+                ["sudo", "systemctl", "restart", self.display_service_name],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                self.logger.info("Plugin sync: %s restarted successfully", self.display_service_name)
+            else:
+                self.logger.error(
+                    "Plugin sync: failed to restart %s: %s",
+                    self.display_service_name,
+                    result.stderr.strip(),
+                )
+        except Exception as e:
+            self.logger.error("Plugin sync: restart exception: %s", e)
 
     # ── SSH key helpers ───────────────────────────────────────────────────────
 

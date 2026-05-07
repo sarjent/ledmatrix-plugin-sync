@@ -11,6 +11,7 @@ Silently keeps plugins and plugin configuration in sync across multiple LEDMatri
 - **Safe config merge** — only plugin config sections are synced; hardware settings, schedule, timezone, location, and other Pi-specific keys are always preserved locally
 - **Availability check** — if the source is unreachable, the sync is skipped cleanly with no errors
 - **Dry run mode** — log exactly what would change without touching anything
+- **Auto-restart** — automatically restarts the display service when changes are detected, so new plugins load immediately
 - **Zero display time** — runs entirely in the background, never interrupts your display rotation
 
 ## Installation
@@ -44,6 +45,8 @@ After installing on each destination Pi:
 | `sync_frequency_hours` | number | `24` | Hours between syncs — options: 1, 6, 12, 24, 48, 168 |
 | `dry_run` | boolean | `false` | Log what would be synced without making changes |
 | `preserve_local_keys` | array | `[]` | Additional `config.json` keys to always keep from local and never overwrite |
+| `auto_restart` | boolean | `true` | Restart the display service automatically when changes are detected |
+| `display_service_name` | string | `"ledmatrix.service"` | Name of the systemd service to restart |
 
 ### Always preserved locally
 
@@ -56,6 +59,7 @@ The following `config.json` keys are **never** overwritten from source, regardle
 - LEDMatrix v2.0.0 or higher
 - `rsync` and `openssh-client` installed on the Pi (present by default on Raspberry Pi OS)
 - Python 3.9+
+- Passwordless `sudo` for `systemctl restart` (the default Pi OS user already has this)
 
 ## License
 
