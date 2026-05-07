@@ -7,7 +7,6 @@ Silently keeps plugins and plugin configuration in sync across multiple LEDMatri
 ## Features
 
 - **Pull-based sync** — each destination Pi pulls from the source independently; no changes needed on the source when adding new destinations
-- **Up to 8 destinations** — install the plugin on each Pi and point them all at the same source
 - **Shared SSH key** — one key pair, one entry in the source's `authorized_keys`
 - **Safe config merge** — only plugin config sections are synced; hardware settings, schedule, timezone, location, and other Pi-specific keys are always preserved locally
 - **Availability check** — if the source is unreachable, the sync is skipped cleanly with no errors
