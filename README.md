@@ -73,6 +73,14 @@ The following `config.json` keys are **never** overwritten from source, regardle
 
 `display` · `schedule` · `dim_schedule` · `timezone` · `location` · `web_display_autostart` · `plugin_system` · `plugin-sync`
 
+## Firewall
+
+If UFW is enabled on the source Pi (common on Raspberry Pi OS), port 5001 must be opened:
+
+```bash
+sudo ufw allow 5001/tcp comment "LEDMatrix plugin sync"
+```
+
 ## Requirements
 
 - LEDMatrix v2.0.0 or higher
