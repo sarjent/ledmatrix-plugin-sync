@@ -39,9 +39,13 @@ def http_get(host: str, port: int, path: str, token: str = "") -> bytes:
 
 
 def check_availability(host: str, port: int, token: str) -> bool:
+    url = f"http://{host}:{port}/api/health"
+    req = urllib.request.Request(url)
+    if token:
+        req.add_header("X-Sync-Token", token)
     try:
-        http_get(host, port, "/api/health", token)
-        return True
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
     except Exception:
         return False
 

@@ -222,9 +222,13 @@ class PluginSyncPlugin(BasePlugin):
             return True
 
     def _check_availability(self) -> bool:
+        url = f"http://{self.source_host}:{self.source_port}/api/health"
+        req = urllib.request.Request(url)
+        if self.sync_token:
+            req.add_header("X-Sync-Token", self.sync_token)
         try:
-            self._http_get("/api/health")
-            return True
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status == 200
         except Exception:
             return False
 
