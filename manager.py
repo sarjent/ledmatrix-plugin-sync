@@ -110,6 +110,7 @@ class PluginSyncPlugin(BasePlugin):
     # Top-level config.json keys that are Pi-specific and never synced from source.
     _SYSTEM_KEYS = frozenset({
         "display", "schedule", "dim_schedule", "timezone",
+        "sync",
         "location", "web_display_autostart", "plugin_system",
     })
 
