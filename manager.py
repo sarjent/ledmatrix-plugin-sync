@@ -303,7 +303,7 @@ class PluginSyncPlugin(BasePlugin):
                 local_cfg = json.load(f)
 
             preserve = self._SYSTEM_KEYS | self._extra_preserve | {self.plugin_id}
-            merged = dict(local_cfg)
+            merged = {k: v for k, v in local_cfg.items() if k in preserve}
             synced_keys: List[str] = []
             for key, value in source_cfg.items():
                 if key not in preserve:

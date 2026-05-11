@@ -1,7 +1,7 @@
 {
   "id": "plugin-sync",
   "name": "Plugin Sync",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "author": "sarjent",
   "description": "Keeps plugins and configuration in sync across multiple LEDMatrix Pi's over HTTP. Install on the source Pi with server_mode: true and on each destination Pi with source_host pointing to the source.",
   "entry_point": "manager.py",
